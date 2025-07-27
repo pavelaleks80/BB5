@@ -1,17 +1,14 @@
 """
 trader_executor.py
-
-Исполняет сделки на основе сигналов.
-Управляет капиталом, рассчитывает лотность,
-сохраняет статистику торговли в Excel и строит график изменения депозита.
+Исполняет сделки на основе сигналов из БД.
+Работает только с таблицами: quotes_{ticker}, signals_log, positions, trade_logs.
+Не зависит от signals_processor.py.
 """
 
 import pandas as pd
 from tinkoff.invest import Client, OrderDirection, OrderType, AccountType
 from tinkoff.invest.sandbox.client import SandboxClient
 from config import TICKERS, TOKEN, DB_CONFIG, TELEGRAM_CHAT_ID, COMMISSION, SANDBOX_MODE, STARTING_DEPOSIT, MAX_OPERATION_AMOUNT, ACCOUNT_ID, MAX_SHARES_PER_TRADE
-#from signals_processor import update_position, log_signal, was_buy_signal_received, get_last_n_days, connect
-from signals_processor import update_position, log_signal, get_last_n_days, connect
 from telegram_bot import send_telegram_message
 import psycopg2
 import matplotlib.pyplot as plt
@@ -25,309 +22,148 @@ from decimal import Decimal
 
 # === Настройка логирования ===
 LOG_FILE = "trading_log.txt"
-
-# Создаём форматтер: время - уровень - сообщение
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-
-# Конфигурируем логгер
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Логгирование в консоль
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# Логгирование в файл
 file_handler = logging.FileHandler(LOG_FILE, encoding='utf-8')
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
-# Запишем стартовый лог
 logging.info("=== Запуск торгового робота ===")
 
-N=2
-
-STARTING_DEPOSIT = STARTING_DEPOSIT  # Начальный депозит
-MAX_OPERATION_AMOUNT = MAX_OPERATION_AMOUNT  # Максимум на одну операцию
+# === Константы ===
+N = 2
+STARTING_DEPOSIT = STARTING_DEPOSIT
+MAX_OPERATION_AMOUNT = MAX_OPERATION_AMOUNT
 EXCEL_FILE = "trade_history.xlsx"
 CHART_FILE = "balance_chart.png"
 
-ACCOUNT_ID = "92b38166-c110-4801-b7b9-af65b8b3bd28"  # Твой фиксированный ID
+# === Подключение к БД ===
+def connect_db():
+    """Подключение к базе данных"""
+    return psycopg2.connect(**DB_CONFIG)
 
-def get_current_balance():
-    """Получает текущий общий баланс счёта: деньги + стоимость акций."""
-    try:
-        if SANDBOX_MODE:
-            with SandboxClient(TOKEN) as client:
-                # Получаем список активных счетов
-                accounts = client.users.get_accounts().accounts
-                if not accounts:
-                    raise Exception("Нет активных счетов")
-                account_id = accounts[0].id
-
-                # Получаем позиции (денежные средства и акции)
-                positions = client.operations.get_positions(account_id=account_id)
-
-                # Получаем текущие цены по акциям
-                figis = [sec.instrument_uid for sec in positions.securities]
-                if figis:
-                    last_prices = client.market_data.get_last_prices(figi=figis)
-                    price_dict = {price.figi: price.price for price in last_prices.last_prices}
-
-                    # Рассчитываем стоимость акций
-                    shares_value = 0.0
-                    for sec in positions.securities:
-                        figi = sec.instrument_uid
-                        if figi in price_dict:
-                            price = price_dict[figi].units + price_dict[figi].nano / 1e9
-                            shares_value += float(sec.balance * price)
-                        else:
-                            print(f"[!] Не удалось получить цену для {figi}")
-                else:
-                    shares_value = 0.0
-
-                money_rub = sum(
-                    money.units + money.nano / 1e9
-                    for money in positions.money
-                    if money.currency == "rub"
-                )
-
-                return money_rub + shares_value
-
-        else:
-            with Client(TOKEN) as client:
-                # Аналогично для реального режима
-                accounts = client.users.get_accounts().accounts
-                if not accounts:
-                    raise Exception("Нет активных счетов на реальном аккаунте")
-                account_id = accounts[0].id
-
-                positions = client.operations.get_positions(account_id=account_id)
-
-                figis = [sec.instrument_uid for sec in positions.securities]
-                if figis:
-                    last_prices = client.market_data.get_last_prices(figi=figis)
-                    price_dict = {price.figi: price.price for price in last_prices.last_prices}
-
-                    shares_value = 0.0
-                    for sec in positions.securities:
-                        figi = sec.instrument_uid
-                        if figi in price_dict:
-                            price = price_dict[figi].units + price_dict[figi].nano / 1e9
-                            shares_value += float(sec.balance * price)
-                        else:
-                            print(f"[!] Не удалось получить цену для {figi}")
-                else:
-                    shares_value = 0.0
-
-                money_rub = sum(
-                    money.units + money.nano / 1e9
-                    for money in positions.money
-                    if money.currency == "rub"
-                )
-
-                return money_rub + shares_value
-
-    except Exception as e:
-        print(f"[X ПЕСОЧНИЦА] Ошибка получения баланса: {e}")
-        return STARTING_DEPOSIT
-
-def get_full_balance_details():
-    """
-    Возвращает подробную информацию о балансе:
-    - Денежные средства,
-    - Стоимость акций,
-    - Общий баланс.
-    """
-    try:
-        if SANDBOX_MODE:
-            with SandboxClient(TOKEN) as client:
-                positions = client.operations.get_positions(account_id=ACCOUNT_ID)
-                money_rub = sum(
-                    float(money.units + money.nano / 1e9)
-                    for money in positions.money
-                    if money.currency == "rub"
-                )
-                figis = [sec.instrument_uid for sec in positions.securities]
-                shares_value = 0.0
-                if figis:
-                    last_prices = client.market_data.get_last_prices(figi=figis)
-                    price_dict = {price.figi: price.price for price in last_prices.last_prices}
-                    for sec in positions.securities:
-                        figi = sec.instrument_uid
-                        if figi in price_dict:
-                            price = price_dict[figi].units + price_dict[figi].nano / 1e9
-                            shares_value += float(sec.balance * price)
-                        else:
-                            print(f"[!] Не удалось получить цену для {figi}")
-                return {
-                    "money": money_rub,
-                    "shares": shares_value,
-                    "total": money_rub + shares_value
-                }
-        else:
-            with Client(TOKEN) as client:
-                positions = client.operations.get_positions(account_id=ACCOUNT_ID)
-                money_rub = sum(
-                    float(money.units + money.nano / 1e9)
-                    for money in positions.money
-                    if money.currency == "rub"
-                )
-                figis = [sec.instrument_uid for sec in positions.securities]
-                shares_value = 0.0
-                if figis:
-                    last_prices = client.market_data.get_last_prices(figi=figis)
-                    price_dict = {price.figi: price.price for price in last_prices.last_prices}
-                    for sec in positions.securities:
-                        figi = sec.instrument_uid
-                        if figi in price_dict:
-                            price = price_dict[figi].units + price_dict[figi].nano / 1e9
-                            shares_value += float(sec.balance * price)
-                        else:
-                            print(f"[!] Не удалось получить цену для {figi}")
-                return {
-                    "money": money_rub,
-                    "shares": shares_value,
-                    "total": money_rub + shares_value
-                }
-    except Exception as e:
-        print(f"[X ПЕСОЧНИЦА] Ошибка при получении детального баланса: {e}")
-        return {
-            "money": 0.0,
-            "shares": 0.0,
-            "total": STARTING_DEPOSIT
-        }
- 
-def execute_order(figi, quantity, direction):
-    """
-    Выполняет рыночный ордер.
-    """
-    try:
-        if SANDBOX_MODE:
-            with SandboxClient(TOKEN) as client:
-                accounts = client.users.get_accounts().accounts
-                account_id = ACCOUNT_ID if ACCOUNT_ID else accounts[0].id
-
-                if direction == "BUY":
-                    client.orders.post_order(  # Исправлено на новый метод
-                        figi=figi,
-                        quantity=quantity,
-                        account_id=account_id,
-                        order_type=OrderType.ORDER_TYPE_MARKET,
-                        direction=OrderDirection.ORDER_DIRECTION_BUY
-                    )
-                    print(f"[+] Куплено {quantity} шт. {figi}")
-                elif direction == "SELL":
-#                    client.sandbox.post_sandbox_order(
-                    client.orders.post_order(
-                        figi=figi,
-                        quantity=quantity,
-                        account_id=account_id,
-                        order_type=OrderType.ORDER_TYPE_MARKET,
-                        direction=OrderDirection.ORDER_DIRECTION_SELL
-                    )
-                    print(f"[- ПЕСОЧНИЦА] Продано {quantity} шт. {figi}")
-        else:
-            with Client(TOKEN) as client:
-                accounts = client.users.get_accounts().accounts
-                account_id = ACCOUNT_ID if ACCOUNT_ID else accounts[0].id
-
-                if direction == "BUY":
-                    client.orders.post_order(
-                        figi=figi,
-                        quantity=quantity,
-                        account_id=account_id,
-                        order_type=OrderType.ORDER_TYPE_MARKET,
-                        direction=OrderDirection.ORDER_DIRECTION_BUY
-                    )
-                    print(f"[+ РЕАЛ] Куплено {quantity} шт. {figi}")
-
-                elif direction == "SELL":
-                    client.orders.post_order(
-                        figi=figi,
-                        quantity=quantity,
-                        account_id=account_id,
-                        order_type=OrderType.ORDER_TYPE_MARKET,
-                        direction=OrderDirection.ORDER_DIRECTION_SELL
-                    )
-                    print(f"[- РЕАЛ] Продано {quantity} шт. {figi}")
-        return True
-    except Exception as e:
-        print(f"[X ПЕСОЧНИЦА] Ошибка выполнения ордера: {e}")
-        return False
-
+# === Получение FIGI по тикеру ===
 def get_figi_by_ticker(ticker):
-    """
-    Получает FIGI по тикеру.
-    """
+    """Получает FIGI инструмента по тикеру"""
     try:
         if SANDBOX_MODE:
             with SandboxClient(TOKEN) as client:
-                instruments = client.instruments.shares().instruments
-                for instrument in instruments:
-                    if instrument.ticker == ticker:
-                        return instrument.figi
-                return None
+                instruments = client.instruments
         else:
             with Client(TOKEN) as client:
-                instruments = client.instruments.shares().instruments
-                for instrument in instruments:
-                    if instrument.ticker == ticker:
-                        return instrument.figi
-                return None
+                instruments = client.instruments
+
+        if ticker == 'SPY':
+            r = instruments.etfs()
+        else:
+            r = instruments.shares()
+
+        for instrument in r.instruments:
+            if instrument.ticker == ticker:
+                return instrument.figi
+        return None
     except Exception as e:
         print(f"[X ПЕСОЧНИЦА] Ошибка при получении FIGI для {ticker}: {e}")
         return None
 
-#=========================================================================
-#def log_trade(signal_type, ticker, price, quantity, amount, profit=None):
-#    """
-#    Логирует сделки в DataFrame и сохраняет в Excel.
-#    Создаёт файл, если его нет.
-#    """
-#    balance = get_current_balance()
-#    timestamp = datetime.datetime.now()
-#    df_new = pd.DataFrame([{
-#        "timestamp": datetime.datetime.now(),
-#        "signal": signal_type,
-#        "ticker": ticker,
-#        "price": price,
-#        "quantity": quantity,
-#        "amount": amount,
-#        "profit": profit,
-#        "balance": balance
-#    }])
-#    
-#    try:
-#        if not os.path.exists(EXCEL_FILE):
-#            df_new.to_excel(EXCEL_FILE, index=False, sheet_name="Trades")
-#            print(f"[REPORT ПЕСОЧНИЦА] Создан новый файл отчёта: {EXCEL_FILE}")
-#        else:
-#            with pd.ExcelWriter(EXCEL_FILE, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
-#                df_new.to_excel(writer, sheet_name="Trades", header=False, startrow=writer.sheets["Trades"].max_row, index=False)
-#            print(f"[OK ПЕСОЧНИЦА] Записана сделка: {ticker}, {signal_type}, {price:.2f} руб.")
-#    except Exception as e:
-#        print(f"[X ПЕСОЧНИЦА] Ошибка записи в Excel: {e}")
-#        df_existing = pd.read_excel(EXCEL_FILE)
-#        df_combined = pd.concat([df_existing, df_new], ignore_index=True)
-#        df_combined.to_excel(EXCEL_FILE, index=False)
-#        print(f"[ПЕСОЧНИЦА] Восстановлен файл отчёта после ошибки")
-#=========================================================================
-#=== Изменено 20.07.25 ===================================================        
-def log_trade(signal_type, ticker, price, quantity, amount, profit=None):
-    """
-    Логирует сделки в DataFrame и сохраняет в Excel и БД.
+# === Получение последних N свечей из таблицы quotes_{ticker} ===
+def get_last_n_days(ticker, n=2):
+    """Получает последние n свечей из таблицы quotes_{ticker}"""
+    table_name = f"quotes_{ticker.lower()}"
+    query = f"""
+        SELECT date, open, close, sma, lower_band
+        FROM {table_name}
+        ORDER BY date DESC
+        LIMIT %s
     """
     try:
-        balance = get_current_balance()
-        timestamp = datetime.datetime.now()
+        with connect_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (n,))
+                rows = cur.fetchall()
+                if not rows:
+                    return pd.DataFrame()
+                return pd.DataFrame(rows, columns=['date', 'open', 'close', 'sma', 'lower_band'])
     except Exception as e:
-        balance = 0.0
-        logging.warning(f"[!] Не удалось получить баланс для логирования сделки: {e}")
+        print(f"[X ПЕСОЧНИЦА] Ошибка при получении данных из {table_name}: {e}")
+        return pd.DataFrame()
+
+# === Выполнение ордера ===
+def execute_order(figi, quantity, order_type):
+    """Выполняет ордер через Tinkoff API"""
+    try:
+        if SANDBOX_MODE:
+            with SandboxClient(TOKEN) as client:
+                account_id = client.sandbox.get_sandbox_accounts().accounts[0].id
+                client.sandbox.sandbox_pay_in(account_id=account_id, amount=Decimal(1_000_000))
+        else:
+            with Client(TOKEN) as client:
+                account_id = ACCOUNT_ID
+
+        direction = OrderDirection.ORDER_DIRECTION_BUY if order_type == "BUY" else OrderDirection.ORDER_DIRECTION_SELL
+
+        if SANDBOX_MODE:
+            response = client.sandbox.post_order(
+                figi=figi,
+                quantity=quantity,
+                direction=direction,
+                account_id=account_id,
+                order_type=OrderType.ORDER_TYPE_MARKET,
+                order_id=str(hash(figi))[:36]
+            )
+        else:
+            response = client.orders.post_order(
+                figi=figi,
+                quantity=quantity,
+                direction=direction,
+                account_id=account_id,
+                order_type=OrderType.ORDER_TYPE_MARKET,
+                order_id=str(hash(figi))[:36]
+            )
+        return True
+    except Exception as e:
+        print(f"[X ПЕСОЧНИЦА] Ошибка при выполнении ордера {order_type} для {figi}: {e}")
+        return False
+
+# === Получение текущего баланса ===
+def get_current_balance():
+    """Получает текущий баланс счёта"""
+    try:
+        if SANDBOX_MODE:
+            with SandboxClient(TOKEN) as client:
+                accounts = client.sandbox.get_sandbox_accounts()
+                if not accounts.accounts:
+                    client.sandbox.open_sandbox_account()
+                account_id = accounts.accounts[0].id
+                positions = client.operations.get_operations(account_id=account_id).positions
+        else:
+            with Client(TOKEN) as client:
+                accounts = client.users.get_accounts()
+                account_id = ACCOUNT_ID
+                positions = client.operations.get_operations(account_id=account_id).positions
+
+        total_value = 0
+        for pos in positions:
+            total_value += pos.current_price.units + pos.current_price.nano / 1e9
+        return total_value
+    except Exception as e:
+        print(f"[X ПЕСОЧНИЦА] Ошибка при получении баланса: {e}")
+        return STARTING_DEPOSIT
+
+# === Логирование сделки в Excel и БД ===
+def log_trade(signal_type, ticker, price, quantity, amount, profit=None):
+    """Логирует сделку в Excel и в БД"""
+    balance = get_current_balance()
+    timestamp = datetime.datetime.now()
 
     df_new = pd.DataFrame([{
-        "timestamp": datetime.datetime.now(),
+        "timestamp": timestamp,
         "signal": signal_type,
         "ticker": ticker,
         "price": price,
@@ -337,7 +173,6 @@ def log_trade(signal_type, ticker, price, quantity, amount, profit=None):
         "balance": balance
     }])
 
-    # === Логирование в Excel ===
     try:
         if not os.path.exists(EXCEL_FILE):
             df_new.to_excel(EXCEL_FILE, index=False, sheet_name="Trades")
@@ -345,28 +180,13 @@ def log_trade(signal_type, ticker, price, quantity, amount, profit=None):
         else:
             with pd.ExcelWriter(EXCEL_FILE, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
                 df_new.to_excel(writer, sheet_name="Trades", header=False, startrow=writer.sheets["Trades"].max_row, index=False)
-            print(f"[OK ПЕСОЧНИЦА] Записана сделка: {ticker}, {signal_type}, {price:.2f} руб.")
+        print(f"[OK ПЕСОЧНИЦА] Записана сделка: {ticker}, {signal_type}, {price:.2f} руб.")
     except Exception as e:
         print(f"[X ПЕСОЧНИЦА] Ошибка записи в Excel: {e}")
-        logging.error(f"[X ПЕСОЧНИЦА] Ошибка записи в Excel: {e}")
 
-    # === Логирование в БД ===
+    # === Запись в БД (trade_logs) ===
     try:
-        with connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO trade_logs (ticker, trade_type, price, quantity, amount, profit, timestamp)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (ticker, signal_type, price, quantity, amount, profit, datetime.datetime.now()))
-                conn.commit()
-        print(f"[OK ПЕСОЧНИЦА] Записана сделка в БД: {ticker}, {signal_type}, {price:.2f} руб.")
-    except Exception as e:
-        print(f"[X ПЕСОЧНИЦА] Ошибка записи в БД: {e}")
-        logging.error(f"[X ПЕСОЧНИЦА] Ошибка записи в БД: {e}")
-        
-        # === Запись в БД (trade_logs) ===
-    try:
-        with connect() as conn:
+        with connect_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO trade_logs (ticker, trade_type, price, quantity, amount, profit, timestamp)
@@ -377,10 +197,10 @@ def log_trade(signal_type, ticker, price, quantity, amount, profit=None):
     except Exception as e:
         print(f"[X ПЕСОЧНИЦА] Ошибка записи в БД: {e}")
         logging.error(f"[X ПЕСОЧНИЦА] Ошибка записи в БД: {e}")
-#=== КОНЕЦ Изменено 20.07.25 ===================================================        
 
+# === Построение графика баланса ===
 def generate_balance_chart():
-    """Строит график изменения баланса."""
+    """Строит график изменения баланса"""
     if not os.path.exists(EXCEL_FILE):
         print("[X ПЕСОЧНИЦА] Файл trade_history.xlsx не найден")
         return
@@ -389,6 +209,7 @@ def generate_balance_chart():
         if 'balance' not in df.columns:
             print("[X ПЕСОЧНИЦА] Нет данных о балансе для построения графика")
             return
+
         plt.figure(figsize=(12, 6))
         plt.plot(df['timestamp'], df['balance'], label="Баланс", marker='o')
         plt.title("Динамика баланса")
@@ -403,199 +224,216 @@ def generate_balance_chart():
     except Exception as e:
         print(f"[X ПЕСОЧНИЦА] Ошибка при построении графика: {e}")
 
+# === Сброс "сломанных" позиций ===
 def reset_broken_positions():
-    with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE positions
-                SET avg_price = NULL, quantity = 0, in_market = FALSE
-                WHERE avg_price IS NOT NULL AND quantity = 0
-            """)
-            conn.commit()
+    """Сбрасывает позиции, где in_market=True, но нет акций"""
+    try:
+        with connect_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE positions
+                    SET in_market = FALSE, quantity = 0
+                    WHERE in_market = TRUE AND quantity <= 0
+                """)
+                conn.commit()
+    except Exception as e:
+        print(f"[X ПЕСОЧНИЦА] Ошибка при сбросе позиций: {e}")
 
+# === Основной торговый цикл ===
 def main_trading_loop():
-    print("[START ПЕСОЧНИЦА] Запуск торгового робота")
-    logging.info("=== Запуск торгового робота ===")
-    # === Сброс повреждённых позиций ===
-    reset_broken_positions()
     print("[ПЕСОЧНИЦА] Начинаем новый торговый цикл")
-#    send_telegram_message("[ПЕСОЧНИЦА] Начинаем новый торговый цикл")
     logging.info("[ПЕСОЧНИЦА] Начинаем новый торговый цикл")
-    balance_details = get_full_balance_details()
+
+    balance = get_current_balance()
     print(f"[ПЕСОЧНИЦА] Текущий баланс:")
-    logging.info(f"[ПЕСОЧНИЦА] Текущий баланс:")
-    print(f"[ПЕСОЧНИЦА] - Денег на счёте: {balance_details['money']:.2f} руб.")
-    logging.info(f"[ПЕСОЧНИЦА] - Денег на счёте: {balance_details['money']:.2f} руб.")
-    print(f"[ПЕСОЧНИЦА] - Стоимость акций: {balance_details['shares']:.2f} руб.")
-    logging.info(f"[ПЕСОЧНИЦА] - Стоимость акций: {balance_details['shares']:.2f} руб.")
-    print(f"[ПЕСОЧНИЦА] - Итого: {balance_details['total']:.2f} руб.")
-    logging.info(f"[ПЕСОЧНИЦА] - Итого: {balance_details['total']:.2f} руб.")
+    print(f"[ПЕСОЧНИЦА] - Денег на счёте: {balance:.2f} руб.")
+    print(f"[ПЕСОЧНИЦА] - Стоимость акций: 0.00 руб.")
+    print(f"[ПЕСОЧНИЦА] - Итого: {balance:.2f} руб.")
+
+    trade_date = datetime.datetime.now().date()
 
     for ticker in tqdm(TICKERS, desc="Обработка тикеров"):
-        df = get_last_n_days(ticker)
+        df = get_last_n_days(ticker, N)
         if df.empty or len(df) < 2:
             continue
 
-        latest = df.iloc[-1]  # Последняя свеча — самая новая
+        latest = df.iloc[0]
         last_candle_date = latest['date'].date()
-        trade_date = latest['date'].date()
 
-        # Проверяем, был ли сигнал "КУПИ" с момента последней свечи
-        with connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT 1 FROM signals_log
-                    WHERE ticker = %s AND signal_type = 'КУПИ'
-                    AND signal_date >= %s
-                    LIMIT 1
-                """, (ticker, last_candle_date))
-                buy_signal = cur.fetchone() is not None
+        # === Получение сигналов из БД ===
+        buy_signal = False
+        dca_signal = False
+        sell_signal = False
 
-        # Получаем среднюю цену из позиции
+        try:
+            with connect_db() as conn:
+                with conn.cursor() as cur:
+                    # Сигнал "КУПИ"
+                    cur.execute("""
+                        SELECT 1 FROM signals_log
+                        WHERE ticker = %s AND signal_type = 'КУПИ'
+                        AND signal_date >= %s
+                        LIMIT 1
+                    """, (ticker, last_candle_date))
+                    buy_signal = cur.fetchone() is not None
+
+                    # Сигнал "ДОКУПИ"
+                    cur.execute("""
+                        SELECT 1 FROM signals_log
+                        WHERE ticker = %s AND signal_type = 'ДОКУПИ'
+                        AND signal_date >= %s
+                        LIMIT 1
+                    """, (ticker, last_candle_date))
+                    dca_signal = cur.fetchone() is not None
+
+                    # Сигнал "ПРОДАЙ"
+                    cur.execute("""
+                        SELECT 1 FROM signals_log
+                        WHERE ticker = %s AND signal_type = 'ПРОДАЙ'
+                        AND signal_date >= %s
+                        LIMIT 1
+                    """, (ticker, last_candle_date))
+                    sell_signal = cur.fetchone() is not None
+        except Exception as e:
+            print(f"[X ПЕСОЧНИЦА] Ошибка при проверке сигналов для {ticker}: {e}")
+            continue
+
+        # === Получение состояния позиции ===
         avg_pos = None
-        with connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT avg_price, in_market FROM positions WHERE ticker = %s", (ticker,))
-                res = cur.fetchone()
-                if res:
-                    avg_pos, in_market = res
-                else:
-                    avg_pos, in_market = None, False
+        in_market = False
+        try:
+            with connect_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT avg_price, in_market FROM positions WHERE ticker = %s", (ticker,))
+                    res = cur.fetchone()
+                    if res:
+                        avg_pos, in_market = res
+        except Exception as e:
+            print(f"[X ПЕСОЧНИЦА] Ошибка при получении позиции для {ticker}: {e}")
+            continue
 
-#=== Изменено 19.06.25 ===
         # === Сигнал КУПИТЬ ===
         if buy_signal and not avg_pos:
             print(f"[DEBUG] Обработка сигнала КУПИТЬ для тикера: {ticker}")
             logging.info(f"[DEBUG] Обработка сигнала КУПИТЬ для тикера: {ticker}")
-#===========================================
-#            price = latest['open']
-#           qty = min(MAX_OPERATION_AMOUNT // price, MAX_SHARES_PER_TRADE)
-#            amount = price * qty * (1 + COMMISSION)
-#            balance = get_current_balance()
-#            print(f"[DEBUG] Текущий баланс: {balance:.2f} руб., Требуется: {amount:.2f} руб.")
-#            logging.info(f"[DEBUG] Текущий баланс: {balance:.2f} руб., Требуется: {amount:.2f} руб.")
-#            if balance > amount:
-#===========================================
+
             price = latest['open']
-            qty = min(MAX_OPERATION_AMOUNT // price, MAX_SHARES_PER_TRADE)
+            max_qty = MAX_OPERATION_AMOUNT // price
+            qty = min(max_qty, MAX_SHARES_PER_TRADE)
             amount = price * qty * (1 + COMMISSION)
-            balance_details = get_full_balance_details()
-            print(f"[DEBUG] Денежные средства: {balance_details['money']:.2f} руб., Требуется: {amount:.2f} руб.")
-            logging.info(f"[DEBUG] Денежные средства: {balance_details['money']:.2f} руб., Требуется: {amount:.2f} руб.")
+
+            balance_details = {'money': balance}
             if balance_details['money'] > amount:
                 figi = get_figi_by_ticker(ticker)
                 if figi and execute_order(figi, int(qty), "BUY"):
-                    update_position(ticker, price)
-                    log_trade("BUY", ticker, price, qty, amount)
-#                    send_telegram_message(
-#                        f" *[ПЕСОЧНИЦА] [+] Купили* {ticker}, {qty} шт. по {price:.2f} руб.", f"Дата: {trade_date}")
-                    send_telegram_message(
-                        f"*[ПЕСОЧНИЦА] [+] Купили* {ticker}, {qty} шт. по {price:.2f} руб.\nДата: {trade_date}"
-)
-                    time.sleep(2)
-            else:
-#                print(f"[X ПЕСОЧНИЦА] Недостаточно средств для покупки тикера {ticker}. Требуется: {amount:.2f} руб., Доступно: {balance:.2f} руб.")
-                print(f"[X ПЕСОЧНИЦА] Недостаточно средств для покупки тикера {ticker}. Требуется: {amount:.2f} руб., Доступно: {balance_details['money']:.2f} руб.")
-#                logging.warning(f"[X ПЕСОЧНИЦА] Недостаточно средств для покупки тикера {ticker}. Требуется: {amount:.2f} руб., Доступно: {balance:.2f} руб.")
-                logging.warning(f"[X ПЕСОЧНИЦА] Недостаточно средств для покупки тикера {ticker}. Требуется: {amount:.2f} руб., Доступно: {balance_details['money']:.2f} руб.")
-#=== КОНЕЦ Изменено 19.06.25 ===
-        
-#=== Изменено 19.06.25 ===                    
+                    try:
+                        with connect_db() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    INSERT INTO positions (ticker, avg_price, quantity, in_market, created_at, updated_at)
+                                    VALUES (%s, %s, %s, TRUE, NOW(), NOW())
+                                    ON CONFLICT (ticker) DO UPDATE SET
+                                        avg_price = EXCLUDED.avg_price,
+                                        quantity = EXCLUDED.quantity,
+                                        in_market = EXCLUDED.in_market,
+                                        updated_at = NOW()
+                                """, (ticker, price, qty))
+                                conn.commit()
+                        log_trade("BUY", ticker, price, qty, amount)
+                        send_telegram_message(f"*[ПЕСОЧНИЦА] [+] Купили* {ticker}, {qty} шт. по {price:.2f} руб.\nДата: {trade_date}")
+                    except Exception as e:
+                        print(f"[X ПЕСОЧНИЦА] Ошибка при обновлении позиции {ticker}: {e}")
+            time.sleep(2)
+
         # === Сигнал ДОКУПИТЬ ===
-#        elif avg_pos and latest['open'] < avg_pos:
-        elif avg_pos is not None and in_market and latest['open'] < avg_pos:
+        elif dca_signal and avg_pos and in_market:
             print(f"[DEBUG] Обработка сигнала ДОКУПИТЬ для тикера: {ticker}")
             logging.info(f"[DEBUG] Обработка сигнала ДОКУПИТЬ для тикера: {ticker}")
-#================================
-#            price = latest['open']
-#            qty = min(MAX_OPERATION_AMOUNT // price, MAX_SHARES_PER_TRADE)
-#            amount = price * qty * (1 + COMMISSION)
-#            balance = get_current_balance()
-#            print(f"[DEBUG] Текущий баланс: {balance:.2f} руб., Требуется: {amount:.2f} руб.")
-#            logging.info(f"[DEBUG] Текущий баланс: {balance:.2f} руб., Требуется: {amount:.2f} руб.")
-#            
-#            if balance > amount:
-#=================================
-            price = latest['open']
-            qty = min(MAX_OPERATION_AMOUNT // price, MAX_SHARES_PER_TRADE)
-            amount = price * qty * (1 + COMMISSION)
-            balance_details = get_full_balance_details()
-            print(f"[DEBUG] Денежные средства: {balance_details['money']:.2f} руб., Требуется: {amount:.2f} руб.")
-            logging.info(f"[DEBUG] Денежные средства: {balance_details['money']:.2f} руб., Требуется: {amount:.2f} руб.")
-            if balance_details['money'] > amount:
 
+            price = latest['open']
+            new_quantity = MAX_SHARES_PER_TRADE
+            amount = price * new_quantity * (1 + COMMISSION)
+
+            balance_details = {'money': balance}
+            if balance_details['money'] > amount:
                 figi = get_figi_by_ticker(ticker)
-                if figi and execute_order(figi, int(qty), "BUY"):
-                    update_position(ticker, price)
-                    log_trade("DCA", ticker, price, qty, amount)
-                    send_telegram_message(
-#                        f" *[ПЕСОЧНИЦА] [~] Докупили* {ticker}, {qty} шт. по {price:.2f} руб.", f"Дата: {trade_date}")
-                        f"*[ПЕСОЧНИЦА] [~] Докупили* {ticker}, {qty} шт. по {price:.2f} руб.\nДата: {trade_date}")
-                    time.sleep(2)
-            else:
-#                print(f"[X ПЕСОЧНИЦА] Недостаточно средств для докупки тикера {ticker}. Требуется: {amount:.2f} руб., Доступно: {balance:.2f} руб.")
-                print(f"[X ПЕСОЧНИЦА] Недостаточно средств для докупки тикера {ticker}. Требуется: {amount:.2f} руб., Доступно: {balance_details['money']:.2f} руб.")
-#                logging.warning(f"[X ПЕСОЧНИЦА] Недостаточно средств для докупки тикера {ticker}. Требуется: {amount:.2f} руб., Доступно: {balance:.2f} руб.")
-                logging.warning(f"[X ПЕСОЧНИЦА] Недостаточно средств для докупки тикера {ticker}. Требуется: {amount:.2f} руб., Доступно: {balance_details['money']:.2f} руб.")        
-#=== КОНЕЦ Изменено 19.06.25 ===
+                if figi and execute_order(figi, int(new_quantity), "BUY"):
+                    try:
+                        new_avg_price = (avg_pos * (1 - COMMISSION) + price * (1 + COMMISSION)) / 2
+                        new_total_qty = avg_pos + new_quantity
+                        with connect_db() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    UPDATE positions
+                                    SET avg_price = %s, quantity = %s, updated_at = NOW()
+                                    WHERE ticker = %s
+                                """, (new_avg_price, new_total_qty, ticker))
+                                conn.commit()
+                        log_trade("DCA", ticker, price, new_quantity, amount)
+                        send_telegram_message(f"*[ПЕСОЧНИЦА] [~] Докупили* {ticker}, {new_quantity} шт. по {price:.2f} руб.\nДата: {trade_date}")
+                    except Exception as e:
+                        print(f"[X ПЕСОЧНИЦА] Ошибка при обновлении позиции {ticker}: {e}")
+            time.sleep(2)
 
         # === Сигнал ПРОДАТЬ ===
-        elif avg_pos and latest['close'] > latest['sma']:
-            with connect() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT avg_price, quantity, in_market FROM positions WHERE ticker = %s", (ticker,))
-                    res = cur.fetchone()
-                    if res and res[2]:  # Если в рынке
-                        price = latest['open']
-                        qty = res[1]
-                        amount = price * qty * (1 - COMMISSION)
-                        profit = (price - res[0]) * qty * (1 - COMMISSION)
-                        figi = get_figi_by_ticker(ticker)
+        elif sell_signal and avg_pos and in_market:
+            print(f"[DEBUG] Обработка сигнала ПРОДАТЬ для тикера: {ticker}")
+            logging.info(f"[DEBUG] Обработка сигнала ПРОДАТЬ для тикера: {ticker}")
 
-                        if figi and execute_order(figi, int(qty), "SELL"):
-                            log_trade("SELL", ticker, price, qty, amount, profit)
-                            
-                            # Расчёт доходности в процентах
-                            if avg_pos > 0:
-                                profit_percent = ((price - avg_pos) / avg_pos) * 100
-                            else:
-                                profit_percent = 0.0
-                                # Формирование сообщения
-                            message = (
-                                f"*[ПЕСОЧНИЦА] [-] Продали* {ticker}, {qty} шт. по {price:.2f} руб.\n"
-                                f"Прибыль: {profit:.2f} руб. ({profit_percent:.2f}%)\n"
-                                f"Дата: {trade_date}"
-                            )
-                            send_telegram_message(message)
+            price = latest['open']
+            qty = avg_pos
+            amount = price * qty * (1 - COMMISSION)
+            profit = (price - avg_pos) * qty * (1 - COMMISSION)
 
-                            try:
-                                send_telegram_message(
-                                    f"*[ПЕСОЧНИЦА] [-] Продали* {ticker}, {qty} шт. по {price:.2f} руб. Прибыль: {profit:.2f} руб.\nДата: {trade_date}"
-                                    )
-                            except Exception as e:
-                                logging.error(f"[X TELEGRAM] Ошибка при отправке сообщения о продаже {ticker}: {e}")
-                                print(f"[X TELEGRAM] Ошибка при отправке сообщения о продаже {ticker}: {e}")
-                            
-                            # === Деактивация сигналов ===
+            figi = get_figi_by_ticker(ticker)
+            if figi and execute_order(figi, int(qty), "SELL"):
+                try:
+                    log_trade("SELL", ticker, price, qty, amount, profit)
+                    send_telegram_message(f"*[ПЕСОЧНИЦА] [-] Продали* {ticker}, {qty} шт. по {price:.2f} руб. Прибыль: {profit:.2f} руб.\nДата: {trade_date}")
+                    with connect_db() as conn:
+                        with conn.cursor() as cur:
                             cur.execute("""
-                                UPDATE positions 
-                                SET avg_price = NULL, quantity = 0, in_market = FALSE 
+                                UPDATE positions
+                                SET avg_price = NULL, quantity = 0, in_market = FALSE, updated_at = NOW()
                                 WHERE ticker = %s
                             """, (ticker,))
                             conn.commit()
-                            time.sleep(2)
+                except Exception as e:
+                    print(f"[X TELEGRAM] Ошибка при отправке сообщения о продаже {ticker}: {e}")
+            time.sleep(2)
+
     # === Финальная очистка ===
     reset_broken_positions()
     print("[OK ПЕСОЧНИЦА] Цикл торговли завершён")
     send_telegram_message("*[ПЕСОЧНИЦА] Цикл торговли завершён*")
 
+    # === Отправка сообщения, если не было сделок ===
+    with connect_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*) FROM trade_logs
+                WHERE DATE(timestamp) = %s
+            """, (trade_date,))
+            trade_count = cur.fetchone()[0]
+
+    if trade_count == 0:
+        message = f"*[ПЕСОЧНИЦА] [!] Нет сделок* за сегодня.\nДата: {trade_date}"
+        send_telegram_message(message)
+        print(f"[INFO ПЕСОЧНИЦА] Отправлено сообщение: {message}")
+        logging.info(f"[INFO ПЕСОЧНИЦА] Отправлено сообщение: {message}")
+
+# === Запуск ===
 if __name__ == "__main__":
     print("[START ПЕСОЧНИЦА] Запуск торгового робота")
+    # === Отправляем сообщение в Telegram о запуске ===
+    start_msg = "*[ПЕСОЧНИЦА] Запускаем торгового робота*"
+    send_telegram_message(start_msg)
+    print(start_msg)
+    # === Конец Отправляем сообщение в Telegram о запуске ===
     try:
         main_trading_loop()
         generate_balance_chart()
         print("[ПЕСОЧНИЦА] Отчёт сохранён")
-        logging.error("[ПЕСОЧНИЦА] Отчёт сохранён")
     except Exception as e:
         print(f"[X ПЕСОЧНИЦА] Ошибка: {e}")
         logging.error(f"[X ПЕСОЧНИЦА] Ошибка: {e}", exc_info=True)

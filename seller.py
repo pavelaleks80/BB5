@@ -15,11 +15,18 @@ import psycopg2
 
 
 # === Настройка логирования ===
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+LOG_FILE_SELLER = "seller.txt"
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 
+# Логгирование в консоль
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+logging.getLogger().addHandler(console_handler)
+
+# Логгирование в файл
+file_handler = logging.FileHandler(LOG_FILE_SELLER, encoding='utf-8')
+file_handler.setFormatter(formatter)
+logging.getLogger().addHandler(file_handler)
 
 def connect_db():
     """Подключение к базе данных."""
@@ -52,20 +59,28 @@ def get_figi_by_ticker(ticker):
                 return item.figi
     return None
 
-
 def sell_position(figi, quantity, price):
     """Выполняем ордер на продажу."""
-    with Client(TOKEN) as client:
-        response = client.orders.post_order(
-            figi=figi,
-            quantity=quantity,
-            direction=OrderDirection.ORDER_DIRECTION_SELL,
-            account_id=DB_CONFIG['account_id'],
-            order_type=OrderType.ORDER_TYPE_MARKET,
-            order_id=str(hash(figi))[:36]
-        )
-        return response
+    try:
+        with Client(TOKEN) as client:
+            # Получаем список счетов
+            accounts = client.users.get_accounts().accounts
+            if not accounts:
+                raise Exception("Нет активных счетов")
+            account_id = accounts[0].id  # Берём первый счёт
 
+            response = client.orders.post_order(
+                figi=figi,
+                quantity=quantity,
+                direction=OrderDirection.ORDER_DIRECTION_SELL,
+                account_id=account_id,
+                order_type=OrderType.ORDER_TYPE_MARKET,
+                order_id=str(hash(figi))[:36]
+            )
+            return response
+    except Exception as e:
+        logging.error(f"[X seller.py] Ошибка при выполнении ордера на продажу: {e}")
+        return None
 
 def update_position_db(ticker):
     """Обновляем запись в БД — закрываем позицию."""
@@ -104,6 +119,12 @@ def send_report_to_telegram(positions_data):
     send_telegram_message(message)
     logging.info("[seller.py] Сообщение с отчетом отправлено в Telegram")
 
+# === Запрос актуальной цены в API
+def get_last_price(figi):
+    """Получает последнюю цену по FIGI."""
+    with Client(TOKEN) as client:
+        last_price = client.market_data.get_last_prices(figi=figi).last_prices[0].price
+        return float(last_price.units + last_price.nano / 1e9)
 
 def main():
     logging.info("[seller.py] Запуск скрипта для закрытия позиций")
@@ -124,7 +145,8 @@ def main():
 
         # Получаем текущую цену (через последнюю свечу или ордербуку)
         # Для примера используем цену закрытия последней свечи (заменить на актуальную)
-        exit_price = Decimal(100.00)  # ← здесь должна быть реальная цена из API
+#        exit_price = Decimal(100.00)  # ← здесь должна быть реальная цена из API
+        exit_price = Decimal(get_last_price(figi))
 
         # Выполняем продажу
         try:
