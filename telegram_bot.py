@@ -3,35 +3,6 @@
 #
 #Отправляет уведомления в Telegram через Bot API.
 #"""
-#
-#import requests
-#from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-#==================================================================
-#
-#def send_telegram_message(message):
-#    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-#    payload = {
-#        "chat_id": TELEGRAM_CHAT_ID,
-#        "text": message,
-#        "parse_mode": "Markdown"
-#    }
-#    try:
-#        requests.post(url, json=payload)
-#    except Exception as e:
-#        print("Ошибка при отправке сообщения:", e)
-#
-#def send_long_message(message):
-#    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-#    payload = {
-#        "chat_id": TELEGRAM_CHAT_ID,
-#        "text": message,
-#        "parse_mode": "Markdown"
-#    }
-#    try:
-#        requests.post(url, json=payload)
-#    except Exception as e:
-#        print("Ошибка при отправке сообщения:", e)
-#==================================================================
 
 #=== Изменено 16.07.25 - Добавлено логирование ====================
 """
@@ -99,4 +70,5 @@ def send_long_message(message):
         except requests.exceptions.RequestException as e:
             error_msg = f"[X TELEGRAM] Ошибка при отправке части сообщения: {e}"
             logger.error(error_msg, exc_info=True)
+
             print(error_msg)
