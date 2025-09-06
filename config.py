@@ -11,21 +11,14 @@ SANDBOX_MODE = True  # Установите False для реального сч
 
 # Токен для доступа к Tinkoff Invest API
 #TOKEN = '' # Боевой
-#TOKEN = 't.dEx9c4Yej8AJGAxaKZOUAOq9UQWxJvzKqNiaDx7xJGFA6FgV6i1YABSUuB80bEsmheTWiPPKevR7Ix9dNS-maw' # Песочница
 TOKEN = 't.r75yhXqlYNDre3i1FVpWS_E4LEdAF1pRjmf7lGCMgJUY-3g0dVatxM4lhk94eMqnM9hxUVOcdEHfob5jumRfZA' # Песочница
 
-
-
 # Токен для Telegram API | bot: @bollbandbot
-TELEGRAM_BOT_TOKEN = '7380650846:AAGdPGshlMvV96RHeIYiWD6Dw12TX5bt7Ys'
+TELEGRAM_BOT_TOKEN = '' #Введите токен вашего телеграм канала
 # ID канала в Telegram | CHAT https://t.me/bollingerbandbot1 | @bollingerbandbot1
-TELEGRAM_CHAT_ID = -1001900882369
+TELEGRAM_CHAT_ID =  #Введите ID вашего еудупкфь канала
 
 TICKERS = [
-#    'SBER', 'SBERP', 'NVTK', 'LKOH', 'GAZP', 'SIBN', 'GMKN', 'TATN', 'TATNP', 
-#    'SNGS', 'SNGSP', 'PLZL', 'CHMF', 'YDEX', 'NLMK', 'PHOR', 'IRKT', 'MGNT', 
-#    'AKRN', 'MAGN', 'MTSS', 'PIKK', 'RUAL', 'ALRS', 'T', 'UNAC', 'BANE', 
-#    'BANEP', 'VSMO', 'ROSN', 'TRNFP', 'VTBR'
     'SBER', 'SBERP', 'ROSN', 'LKOH', 'NVTK', 'GAZP', 'SIBN', 'PLZL', 'GMKN', 'YDEX', 
     'TATN', 'TATNP', 'SNGS', 'SNGSP', 'VTBR', 'X5', 'TRNFP', 'T', 'CHMF', 'PHOR', 
     'NLMK', 'AKRN', 'UNAC', 'MTSS', 'RUAL', 'MOEX', 'MGNT', 'SVCB', 'PIKK', 'MAGN',
@@ -71,3 +64,4 @@ ACCOUNT_ID = "92b38166-c110-4801-b7b9-af65b8b3bd28"  # Твой фиксиров
 
 # Максимум акций на одну сделку
 MAX_SHARES_PER_TRADE = 10
+
