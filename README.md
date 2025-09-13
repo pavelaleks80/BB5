@@ -36,17 +36,28 @@
 ## 📦 Структура проекта
 tinkoff-bollinger-bot/
 ├── config.py # Конфигурация: токены, тикеры, настройки БД
+
 ├── data_loader.py # Загрузка данных из API в БД
+
 ├── signals_processor.py # Анализ данных и генерация торговых сигналов
+
 ├── telegram_notifier.py # Отправка сигналов в Telegram
+
 ├── trader_executor.py # Исполнение торговых сигналов через API
+
 ├── seller.py # Скрипт аварийного закрытия всех позиций
+
 ├── main.py # Главный скрипт для запуска всего пайплайна
+
 ├── telegram_bot.py # Модуль для работы с Telegram API
+
 ├── equity_chart.py # Генерация графика эквити (пример)
+
 ├── requirements.txt # Зависимости Python
-├── README.md # Этот файл
-└── INSTRUCTIONS.md # Подробная инструкция по настройке и запуску
+
+├── README.md
+
+└── INSTRUCTIONS.md # README.md
 
 ========================================================
 
