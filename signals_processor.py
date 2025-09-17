@@ -1,3 +1,4 @@
+# Изменено 17.09.25 / чат: https://chat.qwen.ai/s/524b2b36-3ae1-4c99-9395-9d0f64f3e318?fev=0.0.208
 """
 signals_processor.py
 Назначение: Обрабатывает торговые сигналы на основе исторических данных
@@ -12,12 +13,13 @@ signals_processor.py
 import psycopg2
 import pandas as pd
 from datetime import datetime
-from tqdm import tqdm  # Импортируем tqdm для прогресс-бара
+from tqdm import tqdm
 from config import DB_CONFIG, TICKERS
 from telegram_bot import send_telegram_message
 import time
 
 N = 5  # Количество дней истории (влево) для проверки наличия сигнала ВНИМАНИЕ
+
 
 # Задержка в отправке сообщений
 def send_with_delay(message):
@@ -25,13 +27,15 @@ def send_with_delay(message):
         send_telegram_message(message)
         time.sleep(3)  # Задержка 3 секунды между сообщениями
     except Exception as e:
-        print(f" Ошибка при отправке сообщения: {e}")
+        print(f"Ошибка при отправке сообщения: {e}")
         time.sleep(5)  # Увеличиваем задержку при ошибке
 
-# Добавлено 17.07.25 Сообщение о начала анализа сигналов
+
+# Сообщение о начале анализа сигналов
 msg = "* ПЕСОЧНИЦА Начинаем анализ сигналов*"
 send_with_delay(msg)
 print(msg)
+
 
 def connect():
     """Подключение к базе данных PostgreSQL"""
@@ -74,6 +78,7 @@ def get_last_n_days(ticker, n=N):
                 columns = [desc[0] for desc in cursor.description]
                 data = cursor.fetchall()
                 df = pd.DataFrame(data, columns=columns)
+                df['date'] = pd.to_datetime(df['date'])  # Гарантируем тип datetime
                 return df.sort_values('date').reset_index(drop=True)
     except Exception as e:
         print(f"Ошибка при загрузке данных для {ticker}: {e}")
@@ -83,7 +88,7 @@ def get_last_n_days(ticker, n=N):
 # Класс определяющий порядок поступления сигналов
 class PositionState:
     def __init__(self):
-        self.state = {}  # ticker -> 'attention' / 'in_market'
+        self.state = {}  # ticker -> {'status': 'attention'/'in_market', 'date': ..., 'price': ...}
 
     def set_attention(self, ticker, date, price):
         self.state[ticker] = {'status': 'attention', 'date': date, 'price': price}
@@ -127,7 +132,7 @@ def create_positions_table():
                     in_market BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT NOW(),
                     updated_at TIMESTAMP
-                    )
+                )
             """)
             conn.commit()
 
@@ -171,20 +176,27 @@ def deactivate_related_signals(ticker):
                   AND signal_type IN ('ВНИМАНИЕ', 'КУПИ', 'ДОКУПИ')
                   AND is_active = TRUE
             """, (ticker,))
+            conn.commit()
 
 
 def was_buy_signal_received(ticker, attention_date):
     """
-    Проверяет, был ли сигнал КУПИ на основе данного сигнала ВНИМАНИЕ
+    Проверяет, есть ли сигнал 'КУПИ', который прямо ссылается на этот конкретный 'ВНИМАНИЕ'
     """
     with connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT 1 FROM signals_log
-                WHERE ticker = %s AND signal_type = 'КУПИ'
-                  AND signal_date > %s
+                WHERE ticker = %s 
+                  AND signal_type = 'КУПИ'
+                  AND parent_id IN (
+                      SELECT id FROM signals_log
+                      WHERE ticker = %s 
+                        AND signal_type = 'ВНИМАНИЕ'
+                        AND signal_date = %s
+                  )
                 LIMIT 1
-            """, (ticker, attention_date))
+            """, (ticker, ticker, attention_date))
             return cur.fetchone() is not None
 
 
@@ -216,17 +228,47 @@ def update_position(ticker, price):
             conn.commit()
 
 
+def load_active_attention_states():
+    """Загружает все активные сигналы 'ВНИМАНИЕ' из базы в position_state"""
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ticker, signal_date
+                FROM signals_log
+                WHERE signal_type = 'ВНИМАНИЕ'
+                  AND is_active = TRUE
+            """)
+            rows = cur.fetchall()
+            for ticker, signal_date in rows:
+                df = get_last_n_days(ticker, n=100)  # Загружаем достаточно данных
+                if df.empty:
+                    continue
+                match = df[df['date'].dt.date == signal_date]
+                if not match.empty:
+                    close_price = match.iloc[0]['close']
+                    position_state.set_attention(ticker, signal_date, close_price)
+                    print(f"[i] Восстановлено состояние 'ВНИМАНИЕ' для {ticker} от {signal_date}: {close_price:.3f}")
+                else:
+                    print(f"[W] Для {ticker} сигнал 'ВНИМАНИЕ' от {signal_date} не найден в данных")
+
+
 def check_signals():
     """Основной метод проверки сигналов"""
     create_signals_log_table()
     create_positions_table()
+
+    # 🔧 ВОССТАНАВЛИВАЕМ ВСЕ АКТИВНЫЕ "ВНИМАНИЕ" ИЗ БАЗЫ ПРИ СТАРТЕ
+    print(f"[i] Загружаем активные состояния из базы...")
+    load_active_attention_states()
+    print(f"[i] Загружено {len(position_state.state)} активных состояний 'ВНИМАНИЕ'")
+
     signals_found = False
-    signal_summary = {  # Для хранения информации о найденных сигналах
-    "ВНИМАНИЕ": [],
-    "КУПИ": [],
-    "ДОКУПИ": [],
-    "ПРОДАЙ": []
-}
+    signal_summary = {
+        "ВНИМАНИЕ": [],
+        "КУПИ": [],
+        "ДОКУПИ": [],
+        "ПРОДАЙ": []
+    }
 
     for ticker in tqdm(TICKERS, desc="Проверка сигналов по тикерам"):
         df = get_last_n_days(ticker)
@@ -243,18 +285,19 @@ def check_signals():
             attention_rows = df_after_trend[df_after_trend['close'] < df_after_trend['lower_band']]
             if not attention_rows.empty:
                 attention_row = attention_rows.iloc[0]
+                attention_date = attention_row['date'].date()
 
                 # Проверяем, есть ли уже активный сигнал "ВНИМАНИЕ"
-                if has_active_attention_signal(ticker, attention_row['date'].date()):
-                    pass
+                if has_active_attention_signal(ticker, attention_date):
+                    pass  # Пропускаем, если уже есть
                 else:
-                    msg = f"* ПЕСОЧНИЦА [!] ВНИМАНИЕ* ({ticker})\nДата: {attention_row['date'].date()}\nЦена: {attention_row['close']:.2f}"
+                    msg = f"* ПЕСОЧНИЦА [!] ВНИМАНИЕ* ({ticker})\nДата: {attention_date}\nЦена: {attention_row['close']:.2f}"
                     send_with_delay(msg)
                     print(msg)
                     signals_found = True
-                    signal_summary["ВНИМАНИЕ"].append(ticker)  # 17.07.25 - Добавляем тикер в итоговый список
-                    log_signal(ticker, "ВНИМАНИЕ", attention_row['date'].date())
-                    position_state.set_attention(ticker, attention_row['date'], attention_row['close'])
+                    signal_summary["ВНИМАНИЕ"].append(ticker)
+                    log_signal(ticker, "ВНИМАНИЕ", attention_date)
+                    position_state.set_attention(ticker, attention_date, attention_row['close'])
 
         # === Сигнал 2: КУПИ ===
         state = position_state.get_state(ticker)
@@ -262,70 +305,58 @@ def check_signals():
             attention_date = state['date']
             attention_close = state['price']
 
-            # Находим индекс сигнальной свечи
-            attention_mask = (df['date'] == attention_date) & (df['close'] == attention_close)
+            # 🔧 Сравнение дат через .dt.date — теперь корректно!
+            attention_mask = (df['date'].dt.date == attention_date) & (df['close'] == attention_close)
             if attention_mask.any():
                 attention_index = df.index[attention_mask][0]
 
-                # Проверяем, был ли уже сформирован сигнал "КУПИ"
+                # 🔧 Проверяем, был ли уже КУПИ, привязанный к этому ВНИМАНИЕ
                 if was_buy_signal_received(ticker, attention_date):
-                    pass
+                    pass  # Пропускаем, если уже есть связанный КУПИ
                 else:
                     for i in range(attention_index + 1, len(df)):
                         current_row = df.iloc[i]
-                        if current_row['close'] < attention_close:
-                            closes_since_attention = df.iloc[attention_index+1:i+1]['close']
-                            smas_since_attention = df.iloc[attention_index+1:i+1]['sma']
-                            if all(closes_since_attention <= smas_since_attention):
+                        # ✅ Условие: цена ниже close ВНИМАНИЕ И не выше SMA на той же свече
+                        if current_row['close'] < attention_close and current_row['close'] <= current_row['sma']:
+                            # Получаем ID родительского сигнала "ВНИМАНИЕ"
+                            with connect() as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("""
+                                        SELECT id FROM signals_log
+                                        WHERE ticker = %s AND signal_type = 'ВНИМАНИЕ'
+                                        AND signal_date = %s
+                                    """, (ticker, attention_date))
+                                    result = cur.fetchone()
+                                    attention_signal_id = result[0] if result else None
 
-                                # Получаем ID сигнала "ВНИМАНИЕ"
-                                with connect() as conn:
-                                    with conn.cursor() as cur:
-                                        cur.execute("""
-                                            SELECT id FROM signals_log
-                                            WHERE ticker = %s AND signal_type = 'ВНИМАНИЕ'
-                                            AND signal_date = %s
-                                            """, (ticker, attention_row['date'].date()))
-                                        result = cur.fetchone()
-                                        attention_signal_id = result[0] if result else None
+                            # Записываем сигнал "КУПИ" с правильным parent_id
+                            log_signal(ticker, "КУПИ", current_row['date'].date(), parent_id=attention_signal_id)
 
-                                # Записываем сигнал "КУПИ" с указанием parent_id
-                                if attention_signal_id:
-                                    log_signal(ticker, "КУПИ", current_row['date'].date(), parent_id=attention_signal_id)
-                                else:
-                                    log_signal(ticker, "КУПИ", current_row['date'].date())
-
-                                msg = f"* ПЕСОЧНИЦА [+] КУПИ* ({ticker})\nДата: {current_row['date'].date()}\nЦель: {current_row['open']:.2f} (по open завтра)"
-                                send_with_delay(msg)
-                                print(msg)
-                                signals_found = True
-                                signal_summary["КУПИ"].append(ticker)  # 17.07.25 - Добавляем тикер в итоговый список
-                                update_position(ticker, current_row['open'])
-                                position_state.set_in_market(ticker)
-                                break
+                            msg = f"* ПЕСОЧНИЦА [+] КУПИ* ({ticker})\nДата: {current_row['date'].date()}\nЦель: {current_row['open']:.2f} (по open завтра)"
+                            send_with_delay(msg)
+                            print(msg)
+                            signals_found = True
+                            signal_summary["КУПИ"].append(ticker)
+                            update_position(ticker, current_row['open'])
+                            position_state.set_in_market(ticker)
+                            break  # Выходим — берем первый подходящий сигнал
 
         # === Сигнал 3: ДОКУПИ ===
         with connect() as conn:
             with conn.cursor() as cur:
-
-# === Изменено 19.06.25 ===
                 cur.execute("SELECT avg_price, in_market FROM positions WHERE ticker = %s", (ticker,))
                 result = cur.fetchone()
                 if result:
                     avg_price, in_market = result
                 else:
                     avg_price, in_market = None, False
-# === КОНЕЦ Изменено 19.06.25 ===
-           
-# === Изменено 19.06.25 ===
+
         if avg_price is not None and in_market and latest['close'] < avg_price:
-# === КОНЕЦ Изменено 19.06.25 ===
-            
-            msg = f" * ПЕСОЧНИЦА [~] ДОКУПИ* ({ticker})\nДата: {latest['date'].date()}\nЦель: {latest['open']:.2f} (по open завтра)"
+            msg = f"* ПЕСОЧНИЦА [~] ДОКУПИ* ({ticker})\nДата: {latest['date'].date()}\nЦель: {latest['open']:.2f} (по open завтра)"
             send_with_delay(msg)
             print(msg)
             signals_found = True
-            signal_summary["ДОКУПИ"].append(ticker)  # 17.07.25 - Добавляем тикер в итоговый список
+            signal_summary["ДОКУПИ"].append(ticker)
             update_position(ticker, latest['open'])
             log_signal(ticker, "ДОКУПИ", latest['date'].date())
 
@@ -347,10 +378,10 @@ def check_signals():
         already_sold = result[2] if result else False
 
         if in_market and not already_sold and latest['close'] > latest['sma']:
-            msg = f" * ПЕСОЧНИЦА [-] ПРОДАЙ* ({ticker})\nДата: {latest['date'].date()}\nЦель: {latest['open']:.2f} (по open завтра)"
+            msg = f"* ПЕСОЧНИЦА [-] ПРОДАЙ* ({ticker})\nДата: {latest['date'].date()}\nЦель: {latest['open']:.2f} (по open завтра)"
             send_with_delay(msg)
             signals_found = True
-            signal_summary["ПРОДАЙ"].append(ticker)  # 17.07.25 - Добавляем тикер в итоговый список
+            signal_summary["ПРОДАЙ"].append(ticker)
             log_signal(ticker, "ПРОДАЙ", latest['date'].date())
             print(msg)
 
@@ -368,8 +399,7 @@ def check_signals():
 
             position_state.reset(ticker)
 
-# === Изменено 17.07.25 Добавлено обобщающее сообщение ===        
-    # Формируем и отправляем итоговое сообщение
+    # === Формируем и отправляем итоговое сообщение ===
     summary_lines = []
     for signal_type, tickers in signal_summary.items():
         if tickers:
@@ -385,8 +415,7 @@ def check_signals():
         send_with_delay(summary_text)
     except Exception as e:
         print(f"[X] Ошибка при отправке итогового сообщения: {e}")
-# === Конец 17.07.25 Добавлено обобщающее сообщение ===
+
 
 if __name__ == "__main__":
-
     check_signals()
