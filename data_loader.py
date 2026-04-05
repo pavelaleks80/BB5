@@ -227,7 +227,7 @@ def save_to_db(conn, ticker, candles):
         data.append({
             'date': candle.time,
             'open': float(candle.open.units + candle.open.nano / 1e9),
-            'high': float(candle.high.units + candle.open.nano / 1e9),
+            'high': float(candle.high.units + candle.high.nano / 1e9),  # Исправлено: было candle.open.nano
             'low': float(candle.low.units + candle.low.nano / 1e9),
             'close': float(candle.close.units + candle.close.nano / 1e9),
             'volume': int(candle.volume)

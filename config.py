@@ -2,21 +2,32 @@
 config.py
 
 Хранит все параметры системы: токены, тикеры, настройки БД.
+Токены и чувствительные данные загружаются из переменных окружения (.env файл).
 """
 
+import os
 from decimal import Decimal
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения из .env файла
+load_dotenv()
 
 # Режим песочницы Tinkoff Invest API
 SANDBOX_MODE = True  # Установите False для реального счёта
 
 # Токен для доступа к Tinkoff Invest API
-#TOKEN = '' # Боевой
-TOKEN = 't.r75yhXqlYNDre3i1FVpWS_E4LEdAF1pRjmf7lGCMgJUY-3g0dVatxM4lhk94eMqnM9hxUVOcdEHfob5jumRfZA' # Песочница
+# Загружается из переменной окружения TINKOFF_TOKEN
+TOKEN = os.getenv('TINKOFF_TOKEN', '')
+if not TOKEN:
+    raise ValueError("TINKOFF_TOKEN не найден в переменных окружения. Создайте файл .env")
 
 # Токен для Telegram API | bot: @bollbandbot
-TELEGRAM_BOT_TOKEN = '' #Введите токен вашего телеграм канала
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
 # ID канала в Telegram | CHAT https://t.me/bollingerbandbot1 | @bollingerbandbot1
-TELEGRAM_CHAT_ID =  #Введите ID вашего еудупкфь канала
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    print("⚠️  Предупреждение: TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не настроены")
 
 TICKERS = [
     'SBER', 'SBERP', 'ROSN', 'LKOH', 'NVTK', 'GAZP', 'SIBN', 'PLZL', 'GMKN', 'YDEX', 
@@ -29,15 +40,18 @@ TICKERS = [
     'LEAS', 'KMAZ', 'SMLT', 'MSRS', 'RENI']
 
 DB_CONFIG = {
-    'dbname': 'pg4',
-    'user': 'postgres',
-#    'password': 'your_password',
-    'host': 'localhost',
-    'port': 5432,
+    'dbname': os.getenv('DB_NAME', 'pg4'),
+    'user': os.getenv('DB_USER', 'postgres'),
+    'password': os.getenv('DB_PASSWORD', ''),
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'port': int(os.getenv('DB_PORT', 5432)),
 }
 
-# Строка подключения
-DATABASE_URI = f"postgresql://{DB_CONFIG['user']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+# Строка подключения (с паролем, если указан)
+if DB_CONFIG['password']:
+    DATABASE_URI = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+else:
+    DATABASE_URI = f"postgresql://{DB_CONFIG['user']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
 
 N_DAYS = 120 # Число дней тестирования
 
