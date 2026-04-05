@@ -72,9 +72,9 @@ def get_figi_by_ticker(ticker):
         print(f"[X ПЕСОЧНИЦА] Ошибка при получении FIGI для {ticker}: {e}")
         return None
 
-# === Получение последних N свечей из таблицы quotes_{ticker} ===
-def get_last_n_days(ticker, n=2):
-    """Получает последние n свечей из таблицы quotes_{ticker}"""
+# === Получение последних N недель из таблицы quotes_{ticker} ===
+def get_last_n_weeks(ticker, n=2):
+    """Получает последние n недель из таблицы quotes_{ticker}"""
     table_name = f"quotes_{ticker.lower()}"
     query = f"""
         SELECT date, open, close, sma, lower_band
@@ -253,12 +253,12 @@ def main_trading_loop():
     trade_date = datetime.datetime.now().date()
 
     for ticker in tqdm(TICKERS, desc="Обработка тикеров"):
-        df = get_last_n_days(ticker, N)
+        df = get_last_n_weeks(ticker, N)
         if df.empty or len(df) < 2:
             continue
 
         latest = df.iloc[0]
-        last_candle_date = latest['date'].date()
+        last_week_date = latest['date'].date()
 
         # === Получение сигналов из БД ===
         buy_signal = False
@@ -274,7 +274,7 @@ def main_trading_loop():
                         WHERE ticker = %s AND signal_type = 'КУПИ'
                         AND signal_date >= %s
                         LIMIT 1
-                    """, (ticker, last_candle_date))
+                    """, (ticker, last_week_date))
                     buy_signal = cur.fetchone() is not None
 
                     # Сигнал "ДОКУПИ"
@@ -283,7 +283,7 @@ def main_trading_loop():
                         WHERE ticker = %s AND signal_type = 'ДОКУПИ'
                         AND signal_date >= %s
                         LIMIT 1
-                    """, (ticker, last_candle_date))
+                    """, (ticker, last_week_date))
                     dca_signal = cur.fetchone() is not None
 
                     # Сигнал "ПРОДАЙ"
@@ -292,7 +292,7 @@ def main_trading_loop():
                         WHERE ticker = %s AND signal_type = 'ПРОДАЙ'
                         AND signal_date >= %s
                         LIMIT 1
-                    """, (ticker, last_candle_date))
+                    """, (ticker, last_week_date))
                     sell_signal = cur.fetchone() is not None
         except Exception as e:
             print(f"[X ПЕСОЧНИЦА] Ошибка при проверке сигналов для {ticker}: {e}")
