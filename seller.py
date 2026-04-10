@@ -47,7 +47,10 @@ def get_positions():
 
 def get_figi_by_ticker(ticker):
     """Получаем FIGI по тикеру."""
-    with Client(TOKEN) as client:
+    # Используем SandboxClient если включён режим песочницы
+    client_class = SandboxClient if SANDBOX_MODE else Client
+    
+    with client_class(TOKEN) as client:
         instruments = client.instruments
         if ticker == 'SPY':
             r = instruments.etfs()
@@ -62,7 +65,10 @@ def get_figi_by_ticker(ticker):
 def sell_position(figi, quantity, price):
     """Выполняем ордер на продажу."""
     try:
-        with Client(TOKEN) as client:
+        # Используем SandboxClient если включён режим песочницы
+        client_class = SandboxClient if SANDBOX_MODE else Client
+        
+        with client_class(TOKEN) as client:
             # Получаем список счетов
             accounts = client.users.get_accounts().accounts
             if not accounts:

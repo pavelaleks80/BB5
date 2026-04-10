@@ -72,9 +72,9 @@ def get_figi_by_ticker(ticker):
         print(f"[X ПЕСОЧНИЦА] Ошибка при получении FIGI для {ticker}: {e}")
         return None
 
-# === Получение последних N свечей из таблицы quotes_{ticker} ===
-def get_last_n_days(ticker, n=2):
-    """Получает последние n свечей из таблицы quotes_{ticker}"""
+# === Получение последних N недель из таблицы quotes_{ticker} ===
+def get_last_n_weeks(ticker, n=2):
+    """Получает последние n недель из таблицы quotes_{ticker}"""
     table_name = f"quotes_{ticker.lower()}"
     query = f"""
         SELECT date, open, close, sma, lower_band
@@ -253,12 +253,12 @@ def main_trading_loop():
     trade_date = datetime.datetime.now().date()
 
     for ticker in tqdm(TICKERS, desc="Обработка тикеров"):
-        df = get_last_n_days(ticker, N)
+        df = get_last_n_weeks(ticker, N)
         if df.empty or len(df) < 2:
             continue
 
         latest = df.iloc[0]
-        last_candle_date = latest['date'].date()
+        last_week_date = latest['date'].date()
 
         # === Получение сигналов из БД ===
         buy_signal = False
@@ -274,7 +274,7 @@ def main_trading_loop():
                         WHERE ticker = %s AND signal_type = 'КУПИ'
                         AND signal_date >= %s
                         LIMIT 1
-                    """, (ticker, last_candle_date))
+                    """, (ticker, last_week_date))
                     buy_signal = cur.fetchone() is not None
 
                     # Сигнал "ДОКУПИ"
@@ -283,7 +283,7 @@ def main_trading_loop():
                         WHERE ticker = %s AND signal_type = 'ДОКУПИ'
                         AND signal_date >= %s
                         LIMIT 1
-                    """, (ticker, last_candle_date))
+                    """, (ticker, last_week_date))
                     dca_signal = cur.fetchone() is not None
 
                     # Сигнал "ПРОДАЙ"
@@ -292,7 +292,7 @@ def main_trading_loop():
                         WHERE ticker = %s AND signal_type = 'ПРОДАЙ'
                         AND signal_date >= %s
                         LIMIT 1
-                    """, (ticker, last_candle_date))
+                    """, (ticker, last_week_date))
                     sell_signal = cur.fetchone() is not None
         except Exception as e:
             print(f"[X ПЕСОЧНИЦА] Ошибка при проверке сигналов для {ticker}: {e}")
@@ -300,14 +300,15 @@ def main_trading_loop():
 
         # === Получение состояния позиции ===
         avg_pos = None
+        current_qty = 0
         in_market = False
         try:
             with connect_db() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT avg_price, in_market FROM positions WHERE ticker = %s", (ticker,))
+                    cur.execute("SELECT avg_price, quantity, in_market FROM positions WHERE ticker = %s", (ticker,))
                     res = cur.fetchone()
                     if res:
-                        avg_pos, in_market = res
+                        avg_pos, current_qty, in_market = res
         except Exception as e:
             print(f"[X ПЕСОЧНИЦА] Ошибка при получении позиции для {ticker}: {e}")
             continue
@@ -359,8 +360,13 @@ def main_trading_loop():
                 figi = get_figi_by_ticker(ticker)
                 if figi and execute_order(figi, int(new_quantity), "BUY"):
                     try:
-                        new_avg_price = (avg_pos * (1 - COMMISSION) + price * (1 + COMMISSION)) / 2
-                        new_total_qty = avg_pos + new_quantity
+                        # Правильный расчёт средней цены: (старая позиция * старая цена + новая позиция * новая цена) / общее количество
+                        old_total_cost = current_qty * avg_pos
+                        new_total_cost = new_quantity * price
+                        total_cost_with_commission = old_total_cost * (1 - COMMISSION) + new_total_cost * (1 + COMMISSION)
+                        new_total_qty = current_qty + new_quantity
+                        new_avg_price = total_cost_with_commission / new_total_qty if new_total_qty > 0 else 0
+                        
                         with connect_db() as conn:
                             with conn.cursor() as cur:
                                 cur.execute("""

@@ -73,8 +73,8 @@ def find_earliest_available_date(client, figi, ticker):
         candles = client.market_data.get_candles(
             figi=figi,
             from_=start_date,
-            to=start_date + timedelta(days=1),
-            interval=CandleInterval.CANDLE_INTERVAL_DAY
+            to=start_date + timedelta(days=7),
+            interval=CandleInterval.CANDLE_INTERVAL_WEEK
         )
         if candles.candles:
             print(f"Найдены данные с самой ранней даты {start_date}")
@@ -89,17 +89,17 @@ def find_earliest_available_date(client, figi, ticker):
             candles = client.market_data.get_candles(
                 figi=figi,
                 from_=mid_date,
-                to=mid_date + timedelta(days=1),
-                interval=CandleInterval.CANDLE_INTERVAL_DAY
+                to=mid_date + timedelta(days=7),
+                interval=CandleInterval.CANDLE_INTERVAL_WEEK
             )
             if candles.candles:
                 print(f"Найдены данные для даты {mid_date}")
                 last_successful_date = mid_date
-                end_date = mid_date - timedelta(days=1)
+                end_date = mid_date - timedelta(days=7)
             else:
-                start_date = mid_date + timedelta(days=1)
+                start_date = mid_date + timedelta(days=7)
         except RequestError:
-            start_date = mid_date + timedelta(days=1)
+            start_date = mid_date + timedelta(days=7)
 
     if last_successful_date:
         print(f"Самая ранняя доступная дата: {last_successful_date}")
@@ -133,7 +133,7 @@ def get_candles(client, figi, from_date, ticker):
                 figi=figi,
                 from_=current_date,
                 to=next_date,
-                interval=CandleInterval.CANDLE_INTERVAL_DAY
+                interval=CandleInterval.CANDLE_INTERVAL_WEEK
             )
             if candles.candles:
                 all_candles.extend(candles.candles)
@@ -152,7 +152,7 @@ def calculate_bollinger_bands(df, window=20, num_std=2):
 
     Args:
         df: DataFrame с данными по ценам
-        window: окно скользящего среднего
+        window: окно скользящего среднего (в неделях)
         num_std: количество стандартных отклонений
 
     Returns:
@@ -227,7 +227,7 @@ def save_to_db(conn, ticker, candles):
         data.append({
             'date': candle.time,
             'open': float(candle.open.units + candle.open.nano / 1e9),
-            'high': float(candle.high.units + candle.open.nano / 1e9),
+            'high': float(candle.high.units + candle.high.nano / 1e9),  # Исправлено: было candle.open.nano
             'low': float(candle.low.units + candle.low.nano / 1e9),
             'close': float(candle.close.units + candle.close.nano / 1e9),
             'volume': int(candle.volume)
