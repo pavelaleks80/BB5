@@ -17,9 +17,9 @@ from tqdm import tqdm
 from datetime import datetime, timedelta
 import psycopg2
 from psycopg2 import sql
-from tinkoff.invest import Client, CandleInterval
-from tinkoff.invest.utils import now
-from tinkoff.invest.exceptions import RequestError
+from tinkoff_invest import ProductionSession, SandboxSession
+from tinkoff_invest.models.types import SubscriptionInterval
+from tinkoff_invest.exceptions import RequestError
 from psycopg2.extras import execute_batch
 from config import DB_CONFIG, TOKEN, TICKERS
 
@@ -53,53 +53,53 @@ Returns:
         return None, None
 
 
-def find_earliest_available_date(client, figi, ticker):
+def find_earliest_available_date(session, figi, ticker):
     """
     Ищет самую раннюю доступную дату для получения данных по тикеру.
 
     Args:
-        client: клиент Tinkoff Invest API
+        session: сессия Tinkoff Invest API
         figi: идентификатор инструмента
         ticker: тикер акции
 
     Returns:
         date: самая ранняя доступная дата
     """
-    end_date = now()
+    end_date = datetime.now()
     start_date = datetime(1900, 1, 1)
     print(f"Поиск самой ранней доступной даты для FIGI {figi} (тикер: {ticker})")
 
     try:
-        candles = client.market_data.get_candles(
+        candles = session.get_candles(
             figi=figi,
-            from_=start_date,
-            to=start_date + timedelta(days=1),
-            interval=CandleInterval.CANDLE_INTERVAL_DAY
+            start_time=start_date,
+            finish_time=start_date + timedelta(days=7),
+            interval=SubscriptionInterval.WEEK
         )
-        if candles.candles:
+        if candles:
             print(f"Найдены данные с самой ранней даты {start_date}")
             return start_date
-    except RequestError:
+    except Exception:
         pass
 
     last_successful_date = None
     while start_date < end_date:
         mid_date = start_date + (end_date - start_date) // 2
         try:
-            candles = client.market_data.get_candles(
+            candles = session.get_candles(
                 figi=figi,
-                from_=mid_date,
-                to=mid_date + timedelta(days=1),
-                interval=CandleInterval.CANDLE_INTERVAL_DAY
+                start_time=mid_date,
+                finish_time=mid_date + timedelta(days=7),
+                interval=SubscriptionInterval.WEEK
             )
-            if candles.candles:
+            if candles:
                 print(f"Найдены данные для даты {mid_date}")
                 last_successful_date = mid_date
-                end_date = mid_date - timedelta(days=1)
+                end_date = mid_date - timedelta(days=7)
             else:
-                start_date = mid_date + timedelta(days=1)
+                start_date = mid_date + timedelta(days=7)
         except RequestError:
-            start_date = mid_date + timedelta(days=1)
+            start_date = mid_date + timedelta(days=7)
 
     if last_successful_date:
         print(f"Самая ранняя доступная дата: {last_successful_date}")
@@ -108,12 +108,12 @@ def find_earliest_available_date(client, figi, ticker):
     return last_successful_date
 
 
-def get_candles(client, figi, from_date, ticker):
+def get_candles(session, figi, from_date, ticker):
     """
     Загружает исторические данные по свечам за указанный период.
 
     Args:
-        client: клиент Tinkoff Invest API
+        session: сессия Tinkoff Invest API
         figi: идентификатор инструмента
         from_date: начальная дата
         ticker: тикер акции
@@ -123,22 +123,22 @@ def get_candles(client, figi, from_date, ticker):
     """
     all_candles = []
     current_date = from_date
-    end_date = now()
+    end_date = datetime.now()
     chunk_size = timedelta(days=365)
 
     while current_date < end_date:
         try:
             next_date = min(current_date + chunk_size, end_date)
-            candles = client.market_data.get_candles(
+            candles = session.get_candles(
                 figi=figi,
-                from_=current_date,
-                to=next_date,
-                interval=CandleInterval.CANDLE_INTERVAL_DAY
+                start_time=current_date,
+                finish_time=next_date,
+                interval=SubscriptionInterval.WEEK
             )
-            if candles.candles:
-                all_candles.extend(candles.candles)
+            if candles:
+                all_candles.extend(candles)
             current_date = next_date
-        except RequestError as e:
+        except Exception as e:
             print(f"Ошибка при получении свечей: {e}")
             break
 
@@ -152,7 +152,7 @@ def calculate_bollinger_bands(df, window=20, num_std=2):
 
     Args:
         df: DataFrame с данными по ценам
-        window: окно скользящего среднего
+        window: окно скользящего среднего (в неделях)
         num_std: количество стандартных отклонений
 
     Returns:
@@ -294,44 +294,47 @@ def main():
     # Подключение к API Тинькофф
     try:
         print("Подключение к API Тинькофф Инвестиций...")
-        with Client(TOKEN) as client:
-            print("Успешное подключение к API Тинькофф")
-            for ticker in tqdm(TICKERS, desc="Обработка тикеров"):
-                try:
-                    print(f"\nНачинаем обработку тикера {ticker}")
+        if SANDBOX_MODE:
+            session = SandboxSession(TOKEN)
+        else:
+            session = ProductionSession(TOKEN)
+        print("Успешное подключение к API Тинькофф")
+        for ticker in tqdm(TICKERS, desc="Обработка тикеров"):
+            try:
+                print(f"\nНачинаем обработку тикера {ticker}")
 
-                    # Получаем FIGI и дату первой свечи для тикера
-                    figi, first_candle_date = get_figi_for_ticker(client, ticker)
-                    if not figi:
-                        tqdm.write(f"FIGI не найден для тикера {ticker}, пропускаем...")
+                # Получаем FIGI и дату первой свечи для тикера
+                figi, first_candle_date = get_figi_for_ticker(session, ticker)
+                if not figi:
+                    tqdm.write(f"FIGI не найден для тикера {ticker}, пропускаем...")
+                    continue
+
+                # Определяем самую раннюю доступную дату
+                if first_candle_date:
+                    earliest_date = first_candle_date
+                    print(f"Используем дату первой свечи из информации об инструменте: {earliest_date}")
+                else:
+                    print("Дата первой свечи не найдена, выполняем поиск...")
+                    earliest_date = find_earliest_available_date(session, figi, ticker)
+                    if not earliest_date:
+                        tqdm.write(f"Не удалось определить начальную дату для {ticker}, пропускаем...")
                         continue
+                
+                print(f"Найдена самая ранняя доступная дата: {earliest_date}")
+                tqdm.write(f"Тикер {ticker}: загрузка данных с {earliest_date}")
 
-                    # Определяем самую раннюю доступную дату
-                    if first_candle_date:
-                        earliest_date = first_candle_date
-                        print(f"Используем дату первой свечи из информации об инструменте: {earliest_date}")
-                    else:
-                        print("Дата первой свечи не найдена, выполняем поиск...")
-                        earliest_date = find_earliest_available_date(client, figi, ticker)
-                        if not earliest_date:
-                            tqdm.write(f"Не удалось определить начальную дату для {ticker}, пропускаем...")
-                            continue
-                        print(f"Найдена самая ранняя доступная дата: {earliest_date}")
+                # Создаем таблицу в БД
+                create_table(conn, ticker)
 
-                    tqdm.write(f"Тикер {ticker}: загрузка данных с {earliest_date}")
+                # Получаем все свечи
+                candles = get_candles(client, figi, earliest_date, ticker)
 
-                    # Создаем таблицу в БД
-                    create_table(conn, ticker)
+                # Сохраняем в БД
+                save_to_db(conn, ticker, candles)
 
-                    # Получаем все свечи
-                    candles = get_candles(client, figi, earliest_date, ticker)
+                tqdm.write(f"Тикер {ticker}: сохранено {len(candles)} записей")
 
-                    # Сохраняем в БД
-                    save_to_db(conn, ticker, candles)
-
-                    tqdm.write(f"Тикер {ticker}: сохранено {len(candles)} записей")
-
-                except Exception as e:
+            except Exception as e:
                     tqdm.write(f"Ошибка при обработке тикера {ticker}: {str(e)}")
                     continue
 

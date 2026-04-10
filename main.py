@@ -50,7 +50,7 @@ def clear_log():
 # Проверяет наличие обновлённых данных в БД
 def data_is_ready():
     """
-    Проверяет, есть ли данные за предыдущий день хотя бы по одному тикеру
+    Проверяет, есть ли данные за предыдущую неделю хотя бы по одному тикеру
     """
     try:
 
@@ -59,7 +59,7 @@ def data_is_ready():
         cur.execute("""
             SELECT EXISTS (
                 SELECT 1 FROM quotes_gazp 
-                WHERE date = CURRENT_DATE - INTERVAL '1 day'
+                WHERE date = CURRENT_DATE - INTERVAL '7 days'
             )
         """)
         is_ready = cur.fetchone()[0]

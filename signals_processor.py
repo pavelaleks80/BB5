@@ -17,7 +17,7 @@ from config import DB_CONFIG, TICKERS
 from telegram_bot import send_telegram_message
 import time
 
-N = 5  # Количество дней истории (влево) для проверки наличия сигнала ВНИМАНИЕ
+N = 5  # Количество недель истории (влево) для проверки наличия сигнала ВНИМАНИЕ
 
 # Задержка в отправке сообщений
 def send_with_delay(message):
@@ -58,7 +58,7 @@ def create_signals_log_table():
 
 
 def get_last_n_days(ticker, n=N):
-    """Получает последние N дней котировок по тикеру"""
+    """Получает последние N недель котировок по тикеру"""
     table_name = f"quotes_{ticker.lower()}"
     query = f"""
         SELECT date, open, high, low, close, volume, sma, upper_band, lower_band
@@ -189,7 +189,7 @@ def was_buy_signal_received(ticker, attention_date):
 
 
 def find_trend_change(df):
-    """Находит индекс последнего случая, когда цена пересекла SMA(20) сверху вниз."""
+    """Находит индекс последнего случая, когда цена пересекла SMA(20) сверху вниз (на недельном таймфрейме)."""
     df['crossed_below_sma'] = (df['close'] < df['sma']) & (df['close'].shift(1) >= df['sma'].shift(1))
     trend_change_rows = df[df['crossed_below_sma']]
     if not trend_change_rows.empty:
@@ -233,8 +233,8 @@ def check_signals():
         if len(df) < 2:
             continue
 
-        latest = df.iloc[-1]  # Последняя свеча — самая новая
-        print(f"[i] {ticker}: последняя дата = {latest['date'].date()}")
+        latest = df.iloc[-1]  # Последняя неделя — самая новая
+        print(f"[i] {ticker}: последняя неделя = {latest['date'].date()}")
 
         # === Сигнал 1: ВНИМАНИЕ ===
         trend_change_index = find_trend_change(df)

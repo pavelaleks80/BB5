@@ -1,38 +1,28 @@
 ```
-# Environment variables
-.env
-.env.local
-*.env.*
-
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.Python
-env/
-venv/
-.venv/
-.venv.bak/
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
+
+# Environment variables
+.env
+.env.local
+.env.*
+
+# Logs
 *.log
+
+# Temporary files
 *.tmp
 *.swp
-*~
-.DS_Store
-Thumbs.db
+*.swo
+
+# IDE
+.vscode/
+.idea/
 
 # Dependencies
-requirements.txt.bak
-
-# Local config
-config_local.py
+venv/
+.venv/
 ```

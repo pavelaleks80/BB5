@@ -53,17 +53,17 @@ if DB_CONFIG['password']:
 else:
     DATABASE_URI = f"postgresql://{DB_CONFIG['user']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
 
-N_DAYS = 120 # Число дней тестирования
+N_WEEKS = 120 # Число недель тестирования (для недельного таймфрейма)
 
-# Параметры для Bollinger Bands
+# Параметры для Bollinger Bands (на недельном таймфрейме)
 BOLLINGER_CONFIG = {
-    'window': 20,      # Период для SMA
+    'window': 20,      # Период для SMA (20 недель)
     'num_std': 2       # Количество стандартных отклонений для полос
 }
 
 # Лимиты запросов к API
 API_LIMITS = {
-    'candles_per_request': 30,  # Дней данных за один запрос
+    'candles_per_request': 365,  # Недель данных за один запрос (увеличено для недельного ТФ)
     'delay_between_requests': 1   # Задержка (секунды) между запросами
 }
 
